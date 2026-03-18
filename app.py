@@ -1,122 +1,136 @@
 import streamlit as st
 import PyPDF2
 import re
+from PIL import Image, ImageDraw, ImageFont
+import io
 
-# Dicionário de UASGs SGB
+# Configurações de Identidade
 UASG_MAP = {
-    "495110": "Administração Central (Sede)",
-    "495130": "Residência de Fortaleza",
-    "495250": "Superintendência de Manaus",
-    "495260": "Residência de Porto Velho",
-    "495300": "Superintendência de Belém",
-    "495350": "Superintendência de Goiânia",
-    "495370": "Residência de Teresina",
-    "495400": "Superintendência de Recife",
-    "495500": "Superintendência de Belo Horizonte",
-    "495550": "Superintendência de São Paulo",
-    "495600": "Superintendência de Porto Alegre"
+    "495110": "ADMINISTRAÇÃO CENTRAL (SEDE)",
+    "495130": "RESIDÊNCIA DE FORTALEZA",
+    "495250": "SUPERINTENDÊNCIA DE MANAUS",
+    "495260": "RESIDÊNCIA DE PORTO VELHO",
+    "495300": "SUPERINTENDÊNCIA DE BELÉM",
+    "495350": "SUPERINTENDÊNCIA DE GOIÂNIA",
+    "495370": "RESIDÊNCIA DE TERESINA",
+    "495400": "SUPERINTENDÊNCIA DE RECIFE",
+    "495500": "SUPERINTENDÊNCIA DE BELO HORIZONTE",
+    "495550": "SUPERINTENDÊNCIA DE SÃO PAULO",
+    "495600": "SUPERINTENDÊNCIA DE PORTO ALEGRE"
 }
 
-st.set_page_config(page_title="Atualização das Atas", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Ajuste na Descrição do Objeto - ATA", layout="wide")
 
-# Funções de Extração Inteligente
+# --- FUNÇÕES TÉCNICAS ---
 def extrair_texto(file):
     try:
         reader = PyPDF2.PdfReader(file)
-        return "\n".join([page.extract_text() for page in reader.pages])
+        return "\n".join([p.extract_text() for p in reader.pages])
+    except: return ""
+
+def formatar_especificacao(texto):
+    # Limpeza de ruídos de tabelas
+    ruidos = ["ITEM", "DESCRIÇÃO", "QTDE", "UF", "PREÇO", "UNITARIO", "TOTAL", "R\$", "UNITÁRIO"]
+    for r in ruidos:
+        texto = re.sub(rf"(?i){r}", "", texto)
+    
+    # Busca o bloco do Kit (baseado no seu PDF)
+    match = re.search(r"(Kit de Microcistina.*?(?:Substrato|Solução \"STOP\").*?)\n", texto, re.S | re.I)
+    if match:
+        bloco = match.group(1).strip()
+        # Quebra de linha em listas numeradas
+        bloco = re.sub(r"(\d+\s+(?:Frasco|Tubo|Kit|Manual))", r"\n\1", bloco)
+        return bloco
+    return texto[:800]
+
+def buscar_detalhes(texto):
+    res = {"fabricante": "", "modelo": "", "procedencia": ""}
+    m_fab = re.search(r"(?i)Fabricante\s*[:\-]*\s*([^\n]+)", texto)
+    m_mod = re.search(r"(?i)Modelo\s*[:\-]*\s*([^\n]+)", texto)
+    m_pro = re.search(r"(?i)Procedência\s*[:\-]*\s*([^\n]+)", texto)
+    
+    if m_fab: res["fabricante"] = m_fab.group(1).strip().upper()
+    if m_mod: res["modelo"] = m_mod.group(1).strip().upper()
+    if m_pro: res["procedencia"] = m_pro.group(1).strip().upper()
+    return res
+
+def gerar_imagem_tecnica(texto_final):
+    # Cria uma imagem em branco (A4 proporção ou card)
+    img = Image.new('RGB', (800, 600), color=(255, 255, 255))
+    d = ImageDraw.Draw(img)
+    
+    # Tenta carregar uma fonte padrão, se falhar usa a básica
+    try:
+        fnt = ImageFont.load_default()
     except:
-        return ""
+        fnt = ImageFont.load_default()
 
-def extrair_especificacao(texto):
-    """Tenta localizar o bloco de descrição técnica (Geralmente após 'Objeto' ou 'Item')"""
-    # Procura por padrões onde a descrição costuma começar
-    padrao = re.search(r"(?i)(?:Descrição|Especificação|Objeto)[:\-]*\s*(.*)", texto, re.DOTALL)
-    if padrao:
-        # Pega os primeiros 1000 caracteres para não sobrecarregar
-        return padrao.group(1).strip()[:1000]
-    return ""
+    # Desenha uma borda azul (SGB Style)
+    d.rectangle([10, 10, 790, 590], outline=(0, 69, 135), width=3)
+    d.text((30, 30), "SGB - SERVIÇO GEOLÓGICO DO BRASIL", fill=(0, 69, 135))
+    d.text((30, 60), "ESPECIFICAÇÃO TÉCNICA SANEADA", fill=(0, 0, 0))
+    
+    # Insere o texto (limitado para caber no card)
+    corpo_texto = texto_final[:1000]
+    d.multiline_text((30, 100), corpo_texto, fill=(50, 50, 50), spacing=4)
+    
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
-def localizar_uasg(texto):
-    match = re.search(r"495\d{3}", texto)
-    return match.group(0) if match else None
+# --- INTERFACE ---
+st.title("🛡️ Ajuste na Descrição do Objeto - ATA")
 
-def localizar_marca(texto):
-    padroes = [r"(?i)Marca\s*[:\-]*\s*([^\n,;]+)", r"(?i)Fabricante\s*[:\-]*\s*([^\n,;]+)"]
-    for p in padroes:
-        m = re.search(p, texto)
-        if m: return m.group(1).strip().upper()
-    return ""
+if 'store' not in st.session_state:
+    st.session_state.store = {"txt": "", "detalhes": {}, "resultado": ""}
 
-# Inicialização do Estado (Session State)
-if 'texto_extraido' not in st.session_state: st.session_state.texto_extraido = ""
-if 'marca_extraida' not in st.session_state: st.session_state.marca_extraida = ""
-if 'uasg_extraida' not in st.session_state: st.session_state.uasg_extraida = "Não identificado"
+st.header("1. Insira os seguintes documentos para análise")
+c1, c2, c3 = st.columns(3)
+with c1: f_tr = st.file_uploader("Termo de Referência", type='pdf')
+with c2: f_prop = st.file_uploader("Proposta de Preços", type='pdf')
+with c3: f_ata = st.file_uploader("Ata de Registro", type='pdf')
 
-st.title("🛡️ SGB Audit & Design Hub - Gold Edition")
-
-# --- ÁREA DE UPLOAD ---
-st.header("1. Carga de Documentos")
-col_f1, col_f2, col_f3 = st.columns(3)
-with col_f1: f_tr = st.file_uploader("Termo de Referência", type='pdf')
-with col_f2: f_prop = st.file_uploader("Proposta (Fonte de Dados)", type='pdf')
-with col_f3: f_ata = st.file_uploader("Ata de Registro de Preços", type='pdf')
-
-if st.button("🔍 Extrair Dados e Alimentar Saneador"):
-    if f_prop and f_ata:
-        t_prop = extrair_texto(f_prop)
-        t_ata = extrair_texto(f_ata)
+if st.button("🔍 ANALISAR DOCUMENTOS"):
+    if f_prop:
+        t = extrair_texto(f_prop)
+        st.session_state.store["txt"] = formatar_especificacao(t)
+        st.session_state.store["detalhes"] = buscar_detalhes(t)
         
-        # Alimenta os estados do sistema
-        st.session_state.texto_extraido = extrair_especificacao(t_prop) if t_prop else extrair_especificacao(t_ata)
-        st.session_state.marca_extraida = localizar_marca(t_prop)
-        uasg_cod = localizar_uasg(t_ata)
-        st.session_state.uasg_extraida = f"{uasg_cod} - {UASG_MAP.get(uasg_cod, '')}"
-        
-        st.success("Dados extraídos! Verifique os campos abaixo.")
-    else:
-        st.error("Carregue os arquivos para extração automática.")
+        uasg_m = re.search(r"495\d{3}", t)
+        if uasg_m:
+            st.info(f"UASG: {uasg_m.group(0)} - {UASG_MAP.get(uasg_m.group(0), 'UNIDADE REGIONAL')}")
+        st.success("Análise concluída!")
 
 st.divider()
 
-# --- ÁREA DE SANEAMENTO ---
-st.header("✍️ 2. Saneamento e Versão Final")
+st.header("2. Descrição Ajustada")
+col_in, col_out = st.columns(2)
 
-c1, c2 = st.columns(2)
+with col_in:
+    txt_edit = st.text_area("Redação para Ajuste:", value=st.session_state.store["txt"], height=350)
+    det = st.session_state.store["detalhes"]
+    f_fab = st.text_input("Fabricante:", value=det.get("fabricante", ""))
+    f_mod = st.text_input("Modelo:", value=det.get("modelo", ""))
+    f_pro = st.text_input("Procedência:", value=det.get("procedencia", ""))
 
-with c1:
-    st.subheader("Entrada de Dados")
-    # Este campo é alimentado automaticamente, mas permite edição manual livre
-    desc_para_editar = st.text_area(
-        "Redação Original (Editável):", 
-        value=st.session_state.texto_extraido, 
-        height=250,
-        help="O sistema tentou extrair o texto dos PDFs. Você pode apagar e colar o que quiser aqui."
-    )
-    
-    marca_final = st.text_input("Confirmar Marca/Modelo:", value=st.session_state.marca_extraida)
-    st.caption(f"UASG Identificada: {st.session_state.uasg_extraida}")
+with col_out:
+    if st.button("🪄 GERAR DESCRIÇÃO FINAL"):
+        # Aplica Saneamento
+        final = txt_edit.upper().replace(";", ".")
+        bloco_final = f"{final}\n\nFABRICANTE: {f_fab.upper()}\nMODELO: {f_mod.upper()}\nPROCEDÊNCIA: {f_pro.upper()}"
+        st.session_state.store["resultado"] = bloco_final
 
-with c2:
-    st.subheader("Resultado para o SEI")
-    if st.button("🪄 Gerar Texto Saneado"):
-        # Validação de Termos Proibidos
-        if any(p in desc_para_editar.lower() for p in ["similar", "equivalente", "referencia"]):
-            st.error("🛑 BLOQUEIO: Remova termos como 'similar' ou 'equivalente' da descrição técnica.")
-        elif not marca_final:
-            st.warning("⚠️ Forneça a Marca/Modelo para concluir o saneamento.")
-        else:
-            # Regras de Ouro: Caixa Alta, troca de ; por .
-            saneado = desc_para_editar.upper().replace(";", ".")
-            
-            st.markdown("**Versão Final (Cumpra o Saneamento):**")
-            texto_final_formatado = f"{saneado}\n\nMARCA/FABRICANTE: {marca_final.upper()}"
-            
-            st.code(texto_final_formatado, language="text")
-            st.success("Copiado para a área de transferência? (Use o botão acima)")
-            
-            # Placeholder para a Imagem
-            st.divider()
-            st.markdown("🖼️ **Representação Visual Sugerida:**")
-            st.image("https://via.placeholder.com/400x200.png?text=Preview+Item+Logo+SGB", caption="O layout seguirá o manual SGB 2026")
-
-st.sidebar.info("Dica: Se o texto extraído vier com muitos erros de espaçamento, você pode corrigi-los manualmente na caixa de edição antes de gerar a versão final.")
+    if st.session_state.store["resultado"]:
+        st.code(st.session_state.store["resultado"], language="text")
+        
+        # Módulo de Imagem
+        st.subheader("🖼️ Geração de Imagem do Item")
+        img_data = gerar_imagem_tecnica(st.session_state.store["resultado"])
+        st.image(img_data, caption="Visualização Técnica Saneada")
+        
+        st.download_button(
+            label="📥 Download da Imagem (.PNG)",
+            data=img_data,
+            file_name="descricao_saneada_sgb.png",
+            mime="image/png"
+        )
