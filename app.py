@@ -2,7 +2,7 @@ import streamlit as st
 import PyPDF2
 import re
 
-# Dicionário Completo SGB (Unidades Regionais)
+# Dicionário Completo SGB
 UASG_MAP = {
     "495110": "Administração Central (Sede)",
     "495130": "Residência de Fortaleza",
@@ -17,140 +17,94 @@ UASG_MAP = {
     "495600": "Superintendência de Porto Alegre"
 }
 
-st.set_page_config(page_title="SGB Audit Hub v5", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="SGB Audit Hub v6", layout="wide")
 
-# CSS para melhorar a visualização
-st.markdown("""
-    <style>
-    .main { background-color: #f5f7f9; }
-    .stTextArea textarea { font-size: 14px !important; }
-    .justificado { 
-        text-align: justify; 
-        border: 2px solid #004587; 
-        padding: 25px; 
-        background-color: #ffffff; 
-        color: #1f1f1f;
-        font-family: 'Arial', sans-serif;
-    }
-    .highlight { color: #004587; font-weight: bold; }
-    </style>
-    """, unsafe_allow_html=True)
-
-def extrair_texto_pdf(file):
-    if file is None: return ""
+# Funções de Extração
+def extrair_texto(file):
     try:
-        pdf = PyPDF2.PdfReader(file)
-        return " ".join([page.extract_text() for page in pdf.pages])
+        reader = PyPDF2.PdfReader(file)
+        full_text = ""
+        for page in reader.pages:
+            full_text += page.extract_text() + "\n"
+        return full_text
     except:
         return ""
 
-def capturar_metadados_ata(texto):
-    uasg = re.search(r"(?:UASG|Unidade Gestora)[:\s]*(\d{6})", texto, re.I)
-    gestor = re.search(r"(?:Gestor|Responsável)[:\s]*([A-Z\s]{5,40})", texto, re.I)
-    prazo = re.search(r"(\d+)\s*(?:dias|mês|meses)\s*(?:para entrega|de entrega)", texto, re.I)
-    u_cod = uasg.group(1) if uasg else None
-    return {
-        "UASG": u_cod if u_cod else "Não Identificado",
-        "Unidade": UASG_MAP.get(u_cod, "Não identificada no cabeçalho"),
-        "Gestor": gestor.group(1).strip() if gestor else "A DEFINIR",
-        "Prazo": f"{prazo.group(1)} dias" if prazo else "30 dias"
-    }
+def localizar_uasg(texto):
+    # Procura por 6 dígitos que iniciem com 495 (padrão SGB)
+    match = re.search(r"495\d{3}", texto)
+    return match.group(0) if match else None
 
-def buscar_marca_na_proposta(texto):
-    """Busca cirúrgica de Marca/Modelo apenas na Proposta"""
-    # Procura padrões comuns em propostas comerciais de fornecedores
+def localizar_marca_proposta(texto):
+    # Busca por padrões de marcas em propostas de produtos
     padroes = [
-        r"(?:Marca|Fabricante)[:\s]+([A-Z0-9\s\.\-\/]+)",
-        r"(?:Modelo|Referência)[:\s]+([A-Z0-9\s\.\-\/]+)",
-        r"MARCA\/MODELO[:\s]+([A-Z0-9\s\.\-\/]+)"
+        r"(?i)Marca\s*[:\-]*\s*([^\n\r,;]+)",
+        r"(?i)Fabricante\s*[:\-]*\s*([^\n\r,;]+)",
+        r"(?i)Modelo\s*[:\-]*\s*([^\n\r,;]+)"
     ]
-    
-    resultados = []
     for p in padroes:
-        match = re.search(p, texto, re.I)
-        if match:
-            val = match.group(1).strip().split('\n')[0]
-            if len(val) > 2: resultados.append(val)
-    
-    return " / ".join(list(dict.fromkeys(resultados))) if resultados else ""
+        m = re.search(p, texto)
+        if m:
+            return m.group(1).strip().upper()
+    return ""
 
-st.title("🛡️ SGB Audit & Design Hub")
-st.markdown("---")
+st.title("🛡️ SGB Audit & Design Hub - V6.0")
 
-# Inicialização de estados
-if 'marca_auto' not in st.session_state: st.session_state['marca_auto'] = ""
-if 'meta_ata' not in st.session_state: st.session_state['meta_ata'] = {}
+# Inicialização de estados para evitar perda de dados ao clicar
+if 'dados' not in st.session_state:
+    st.session_state.dados = {"uasg": "", "unidade": "", "marca": "", "texto_final": ""}
 
-# --- SEÇÃO 1: UPLOAD E TRIANGULAÇÃO ---
-st.header("📂 1. Documentação e Auditoria")
-col_f1, col_f2, col_f3 = st.columns(3)
+# --- UPLOADS ---
+col1, col2, col3 = st.columns(3)
+with col1: f_tr = st.file_uploader("1. Termo de Referência", type='pdf')
+with col2: f_prop = st.file_uploader("2. Proposta (Marca/Modelo)", type='pdf')
+with col3: f_ata = st.file_uploader("3. Ata (UASG/Gestor)", type='pdf')
 
-with col_f1: f_tr = st.file_uploader("1. Termo de Referência (TR)", type='pdf')
-with col_f2: f_prop = st.file_uploader("2. Proposta de Preços (Fonte de Marca/Modelo)", type='pdf')
-with col_f3: f_ata = st.file_uploader("3. Ata de Registro de Preços (Cabeçalho)", type='pdf')
-
-if st.button("🔍 Realizar Leitura e Triangulação Automática"):
+if st.button("🔍 EXECUTAR AUDITORIA"):
     if f_prop and f_ata:
-        texto_prop = extrair_texto_pdf(f_prop)
-        texto_ata = extrair_texto_pdf(f_ata)
+        t_prop = extrair_texto(f_prop)
+        t_ata = extrair_texto(f_ata)
         
-        # Ação 1: Buscar Marca EXCLUSIVAMENTE na proposta
-        st.session_state['marca_auto'] = buscar_marca_na_proposta(texto_prop)
+        # Identificar UASG e Unidade
+        uasg_cod = localizar_uasg(t_ata) or localizar_uasg(t_prop)
+        st.session_state.dados["uasg"] = uasg_cod or "Não Encontrado"
+        st.session_state.dados["unidade"] = UASG_MAP.get(uasg_cod, "Unidade não identificada")
         
-        # Ação 2: Capturar Metadados na ATA
-        st.session_state['meta_ata'] = capturar_metadados_ata(texto_ata)
-        
-        st.success("Análise concluída com sucesso!")
+        # Identificar Marca na Proposta
+        st.session_state.dados["marca"] = localizar_marca_proposta(t_prop)
+        st.success("Análise de arquivos concluída!")
     else:
-        st.error("Obrigatório carregar ao menos a Proposta e a ATA para extração.")
+        st.error("Carregue a Proposta e a Ata para análise.")
 
-# Exibição de Metadados se existirem
-if st.session_state['meta_ata']:
-    m = st.session_state['meta_ata']
-    st.markdown("#### 📌 Dados Capturados da ATA")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("UASG", m['UASG'])
-    c2.metric("Unidade", m['Unidade'])
-    c3.metric("Gestor", m['Gestor'])
-    c4.metric("Prazo", m['Prazo'])
+# --- EXIBIÇÃO DE DADOS ---
+st.markdown("### 📌 Resultados da Extração")
+c1, c2, c3 = st.columns(3)
+with c1: st.metric("UASG Detectada", st.session_state.dados["uasg"])
+with c2: st.metric("Unidade Regional", st.session_state.dados["unidade"])
+with c3: 
+    # Permite edição manual caso a extração falhe
+    st.session_state.dados["marca"] = st.text_input("Marca/Modelo (Verifique na Proposta):", value=st.session_state.dados["marca"])
 
-st.markdown("---")
+st.divider()
 
-# --- SEÇÃO 2: SANEAMENTO ---
-st.header("✍️ 2. Saneamento e Transposição para o SEI")
+# --- SANEAMENTO ---
+st.header("✍️ Saneamento de Texto")
+texto_bruto = st.text_area("Cole a descrição original aqui:", height=150)
 
-col_edit, col_res = st.columns([1, 1])
-
-with col_edit:
-    txt_original = st.text_area("Descrição Original (Copie do documento):", height=200)
-    
-    # Campo de Marca preenchido automaticamente pela busca na Proposta
-    marca_final = st.text_input("Marca/Modelo (Extraído automaticamente da Proposta):", 
-                                value=st.session_state['marca_auto'],
-                                help="Este campo é preenchido automaticamente com dados da Proposta de Preços.")
-    
-    if not st.session_state['marca_auto'] and f_prop:
-        st.caption("⚠️ Não detectamos a marca automaticamente no PDF. Por favor, digite manualmente.")
-
-with col_res:
-    if st.button("🪄 Gerar Versão Final Saneada"):
-        termos_erro = ["similar", "equivalente", "referência", "qualidade superior"]
+if st.button("🪄 GERAR TEXTO SANEADO"):
+    if any(p in texto_bruto.lower() for p in ["similar", "equivalente", "referencia"]):
+        st.error("🛑 BLOQUEIO: O texto contém termos proibidos. Use a descrição exata da proposta.")
+    elif not st.session_state.dados["marca"]:
+        st.warning("⚠️ Informe a Marca/Modelo para concluir.")
+    else:
+        # Regras de transposição: Caixa alta, ponto no lugar de ponto e vírgula
+        saneado = texto_bruto.upper().replace(";", ".")
+        marca_f = st.session_state.dados["marca"].upper()
         
-        if any(t in txt_original.lower() for t in termos_erro):
-            st.error("🛑 ERRO DE CONFORMIDADE: Descrição contém termos proibidos ('similar', 'referência', etc).")
-        elif not marca_final:
-            st.warning("⚠️ Informe a Marca/Modelo para finalizar o texto.")
-        else:
-            st.markdown("**Texto Final (Justificado - Pronto para o SEI):**")
-            # Aplicação das regras de saneamento: CAIXA ALTA, troca de ; por .
-            saneado = txt_original.upper().replace(";", ".")
-            
-            output = f"""<div class="justificado">
-                {saneado}<br><br>
-                <b>MARCA/FABRICANTE: {marca_final}</b>
-            </div>"""
-            st.markdown(output, unsafe_allow_html=True)
-            st.button("📋 Copiar Texto (Simulação)")
+        resultado = f"{saneado}\n\nMARCA/FABRICANTE: {marca_f}"
+        st.session_state.dados["texto_final"] = resultado
 
-st.sidebar.markdown("### Instruções")
-st.sidebar.write("1. Suba os PDFs.\n2. O sistema busca a Marca na Proposta.\n3. O sistema busca o Gestor e UASG na ATA.\n4. Corrija o texto e use na transposição.")
+if st.session_state.dados["texto_final"]:
+    st.markdown("#### ✅ Texto Final (Justificado para o SEI)")
+    st.code(st.session_state.dados["texto_final"], language="text")
+    st.info("Copie o texto acima e cole no seu documento oficial.")
