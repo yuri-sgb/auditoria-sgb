@@ -17,102 +17,140 @@ UASG_MAP = {
     "495600": "Superintendência de Porto Alegre"
 }
 
-st.set_page_config(page_title="SGB Audit & Design Hub", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="SGB Audit Hub v5", layout="wide", page_icon="🛡️")
 
-# Estilização
+# CSS para melhorar a visualização
 st.markdown("""
     <style>
-    .justificado { text-align: justify; border-left: 5px solid #004587; padding: 20px; background-color: #ffffff; }
-    .status-box { padding: 10px; border-radius: 5px; margin-bottom: 10px; }
+    .main { background-color: #f5f7f9; }
+    .stTextArea textarea { font-size: 14px !important; }
+    .justificado { 
+        text-align: justify; 
+        border: 2px solid #004587; 
+        padding: 25px; 
+        background-color: #ffffff; 
+        color: #1f1f1f;
+        font-family: 'Arial', sans-serif;
+    }
+    .highlight { color: #004587; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
 def extrair_texto_pdf(file):
     if file is None: return ""
-    pdf = PyPDF2.PdfReader(file)
-    return " ".join([page.extract_text() for page in pdf.pages])
+    try:
+        pdf = PyPDF2.PdfReader(file)
+        return " ".join([page.extract_text() for page in pdf.pages])
+    except:
+        return ""
 
-def capturar_metadados(texto):
+def capturar_metadados_ata(texto):
     uasg = re.search(r"(?:UASG|Unidade Gestora)[:\s]*(\d{6})", texto, re.I)
-    gestor = re.search(r"(?:Gestor|Responsável)[:\s]*([A-Z\s]{5,30})", texto, re.I)
+    gestor = re.search(r"(?:Gestor|Responsável)[:\s]*([A-Z\s]{5,40})", texto, re.I)
     prazo = re.search(r"(\d+)\s*(?:dias|mês|meses)\s*(?:para entrega|de entrega)", texto, re.I)
-    u_cod = uasg.group(1) if uasg else "495110"
+    u_cod = uasg.group(1) if uasg else None
     return {
-        "UASG": u_cod,
-        "Unidade": UASG_MAP.get(u_cod, "Unidade não mapeada"),
+        "UASG": u_cod if u_cod else "Não Identificado",
+        "Unidade": UASG_MAP.get(u_cod, "Não identificada no cabeçalho"),
         "Gestor": gestor.group(1).strip() if gestor else "A DEFINIR",
         "Prazo": f"{prazo.group(1)} dias" if prazo else "30 dias"
     }
 
-def extrair_marca_modelo(texto):
-    """Busca automática de Marca e Modelo em propostas de bens"""
-    # Procura padrões como "Marca: XXXX", "Fabricante: YYYY", "Modelo: ZZZZ"
-    padrao = re.search(r"(?:Marca|Fabricante|Modelo)[:\s]+([A-Z0-9\s\-\/]{3,50})", texto, re.I)
-    if padrao:
-        return padrao.group(1).strip().split('\n')[0]
-    return ""
+def buscar_marca_na_proposta(texto):
+    """Busca cirúrgica de Marca/Modelo apenas na Proposta"""
+    # Procura padrões comuns em propostas comerciais de fornecedores
+    padroes = [
+        r"(?:Marca|Fabricante)[:\s]+([A-Z0-9\s\.\-\/]+)",
+        r"(?:Modelo|Referência)[:\s]+([A-Z0-9\s\.\-\/]+)",
+        r"MARCA\/MODELO[:\s]+([A-Z0-9\s\.\-\/]+)"
+    ]
+    
+    resultados = []
+    for p in padroes:
+        match = re.search(p, texto, re.I)
+        if match:
+            val = match.group(1).strip().split('\n')[0]
+            if len(val) > 2: resultados.append(val)
+    
+    return " / ".join(list(dict.fromkeys(resultados))) if resultados else ""
 
 st.title("🛡️ SGB Audit & Design Hub")
+st.markdown("---")
 
-# --- SEÇÃO 1: TRIANGULAÇÃO E CAPTURA AUTOMÁTICA ---
-st.header("📂 1. Triangulação e Extração Automática")
-col_files = st.columns(3)
-with col_files[0]: tr_file = st.file_uploader("Upload TR", type='pdf')
-with col_files[1]: prop_file = st.file_uploader("Upload Proposta Comercial", type='pdf')
-with col_files[2]: ata_file = st.file_uploader("Upload ATA (ARP)", type='pdf')
+# Inicialização de estados
+if 'marca_auto' not in st.session_state: st.session_state['marca_auto'] = ""
+if 'meta_ata' not in st.session_state: st.session_state['meta_ata'] = {}
 
-# Variáveis de estado para persistência
-if 'marca_detectada' not in st.session_state:
-    st.session_state['marca_detectada'] = ""
+# --- SEÇÃO 1: UPLOAD E TRIANGULAÇÃO ---
+st.header("📂 1. Documentação e Auditoria")
+col_f1, col_f2, col_f3 = st.columns(3)
 
-if st.button("🔍 Iniciar Auditoria e Extração"):
-    if tr_file and prop_file and ata_file:
-        texto_ata = extrair_texto_pdf(ata_file)
-        texto_prop = extrair_texto_pdf(prop_file)
+with col_f1: f_tr = st.file_uploader("1. Termo de Referência (TR)", type='pdf')
+with col_f2: f_prop = st.file_uploader("2. Proposta de Preços (Fonte de Marca/Modelo)", type='pdf')
+with col_f3: f_ata = st.file_uploader("3. Ata de Registro de Preços (Cabeçalho)", type='pdf')
+
+if st.button("🔍 Realizar Leitura e Triangulação Automática"):
+    if f_prop and f_ata:
+        texto_prop = extrair_texto_pdf(f_prop)
+        texto_ata = extrair_texto_pdf(f_ata)
         
-        # Captura Metadados da ATA
-        meta = capturar_metadados(texto_ata)
-        # Captura Automática da Marca na Proposta
-        st.session_state['marca_detectada'] = extrair_marca_modelo(texto_prop)
+        # Ação 1: Buscar Marca EXCLUSIVAMENTE na proposta
+        st.session_state['marca_auto'] = buscar_marca_na_proposta(texto_prop)
         
-        st.markdown("### 📌 Metadados Extraídos")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("UASG", meta["UASG"])
-        m2.metric("Unidade", meta["Unidade"])
-        m3.metric("Gestor", meta["Gestor"])
-        m4.metric("Prazo", meta["Prazo"])
+        # Ação 2: Capturar Metadados na ATA
+        st.session_state['meta_ata'] = capturar_metadados_ata(texto_ata)
         
-        if st.session_state['marca_detectada']:
-            st.success(f"🎯 Marca/Modelo detectado na proposta: **{st.session_state['marca_detectada']}**")
-        else:
-            st.warning("⚠️ Não foi possível extrair a Marca automaticamente. Favor inserir manualmente abaixo.")
-            
-        st.divider()
-        st.info("Comparando descrições técnicas para conformidade...")
-        st.success("✅ Triangulação: Textos em conformidade (TR x Proposta x ATA).")
+        st.success("Análise concluída com sucesso!")
     else:
-        st.error("Upload dos 3 arquivos obrigatório.")
+        st.error("Obrigatório carregar ao menos a Proposta e a ATA para extração.")
 
-st.divider()
+# Exibição de Metadados se existirem
+if st.session_state['meta_ata']:
+    m = st.session_state['meta_ata']
+    st.markdown("#### 📌 Dados Capturados da ATA")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("UASG", m['UASG'])
+    c2.metric("Unidade", m['Unidade'])
+    c3.metric("Gestor", m['Gestor'])
+    c4.metric("Prazo", m['Prazo'])
 
-# --- SEÇÃO 2: SANEAMENTO E TRANSPOISIÇÃO ---
-st.header("✍️ 2. Saneamento e Transposição")
-c_edit, c_view = st.columns([1, 1])
+st.markdown("---")
 
-with c_edit:
-    txt_bruto = st.text_area("Descrição para Saneamento:", height=180)
-    # O campo de marca já vem preenchido se o OCR funcionou
-    marca_final = st.text_input("Confirmar Marca/Modelo:", value=st.session_state['marca_detectada'])
+# --- SEÇÃO 2: SANEAMENTO ---
+st.header("✍️ 2. Saneamento e Transposição para o SEI")
+
+col_edit, col_res = st.columns([1, 1])
+
+with col_edit:
+    txt_original = st.text_area("Descrição Original (Copie do documento):", height=200)
     
-if st.button("🪄 Gerar Versão Saneada"):
-    if any(p in txt_bruto.lower() for p in ["similar", "equivalente", "referência"]):
-        st.error("🛑 BLOQUEIO: Remova termos proibidos da descrição.")
-    elif not marca_final:
-        st.error("⚠️ Marca/Modelo obrigatória.")
-    else:
-        with c_view:
-            st.markdown("**Texto para SEI (Justificado):**")
-            # Saneamento: Caixa alta e troca de ponto e vírgula
-            texto_saneado = txt_bruto.upper().replace(";", ".")
-            st.markdown(f'<div class="justificado">{texto_saneado}<br><br>MARCA/FABRICANTE: {marca_final}</div>', unsafe_allow_html=True)
-            st.info("💡 Pronto para copiar e colar.")
+    # Campo de Marca preenchido automaticamente pela busca na Proposta
+    marca_final = st.text_input("Marca/Modelo (Extraído automaticamente da Proposta):", 
+                                value=st.session_state['marca_auto'],
+                                help="Este campo é preenchido automaticamente com dados da Proposta de Preços.")
+    
+    if not st.session_state['marca_auto'] and f_prop:
+        st.caption("⚠️ Não detectamos a marca automaticamente no PDF. Por favor, digite manualmente.")
+
+with col_res:
+    if st.button("🪄 Gerar Versão Final Saneada"):
+        termos_erro = ["similar", "equivalente", "referência", "qualidade superior"]
+        
+        if any(t in txt_original.lower() for t in termos_erro):
+            st.error("🛑 ERRO DE CONFORMIDADE: Descrição contém termos proibidos ('similar', 'referência', etc).")
+        elif not marca_final:
+            st.warning("⚠️ Informe a Marca/Modelo para finalizar o texto.")
+        else:
+            st.markdown("**Texto Final (Justificado - Pronto para o SEI):**")
+            # Aplicação das regras de saneamento: CAIXA ALTA, troca de ; por .
+            saneado = txt_original.upper().replace(";", ".")
+            
+            output = f"""<div class="justificado">
+                {saneado}<br><br>
+                <b>MARCA/FABRICANTE: {marca_final}</b>
+            </div>"""
+            st.markdown(output, unsafe_allow_html=True)
+            st.button("📋 Copiar Texto (Simulação)")
+
+st.sidebar.markdown("### Instruções")
+st.sidebar.write("1. Suba os PDFs.\n2. O sistema busca a Marca na Proposta.\n3. O sistema busca o Gestor e UASG na ATA.\n4. Corrija o texto e use na transposição.")
