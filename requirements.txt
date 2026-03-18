@@ -1,5 +1,5 @@
 streamlit
 pandas
-Pillow
-python-docx
 PyPDF2
+Pillow
+google-generativeai
