@@ -4,54 +4,32 @@ import re
 import google.generativeai as genai
 import io
 
-# Configuração da IA (Nana Banana) - Certifique-se de que a KEY está nos Secrets
+# Configuração da IA (Nana Banana)
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 st.set_page_config(page_title="Ajuste na Descrição do Objeto - ATA", layout="wide")
 
-def limpar_fragmentacao_texto(texto):
-    """Corrige espaços indevidos no meio das palavras (ex: 'APRESEN TADA' -> 'APRESENTADA')"""
-    # Remove espaços entre letras maiúsculas separadas por um único espaço
-    return re.sub(r'([A-Z])\s(?=[A-Z])', r'\1', texto)
-
-def extrair_texto_bruto(file):
+def extrair_texto_pdf(file):
     try:
         pdf = PyPDF2.PdfReader(file)
         return "\n".join([page.extract_text() for page in pdf.pages])
     except: return ""
 
-def capturar_especificacao_real(texto, item_alvo):
-    item_num = str(int(item_alvo))
-    # Regex mais agressivo: Busca o número do item mas ignora se o texto ao redor for jurídico
-    padrao = rf"(?i)ITEM[:\s]*{item_num}\b(.*?)(?=ITEM[:\s]*\d+\b|SIGLA|VALOR|ESTA\sATA|$)"
-    matches = re.finditer(padrao, texto, re.S)
+def tentar_extrair_item(texto, num_item):
+    """Tenta localizar o item de forma mais flexível"""
+    # Tenta localizar pelo número do item
+    num_limpo = str(int(num_item))
+    padrao = rf"(?i)ITEM[:\s]*{num_limpo}\b(.*?)(?=ITEM[:\s]*\d+\b|VALOR|ESTA\sATA|$)"
+    match = re.search(padrao, texto, re.S)
     
-    for match in matches:
+    if match:
         bloco = match.group(1).strip()
-        # Se o bloco falar de "Diretor" ou "Ato nº", ele pula (é cabeçalho jurídico)
-        if "Diretor-Presidente" in bloco or "Ato nº" in bloco or "nomeado pelo" in bloco:
-            continue
-        
-        # Limpeza de ruído de tabela
-        bloco = re.sub(r"(?i)DESCRIÇÃO|UNIDADE|QUANTIDADE|VALOR|UNITÁRIO|TOTAL|R\$", "", bloco)
-        
-        # Melhora a quebra de linha para a lista de itens inclusos
-        bloco = re.sub(r"(\d+\s+(?:Frasco|Tubo|Kit|Manual|Unidade|Embalagem))", r"\n\1", bloco)
+        # Se vier texto de contrato (Evandro, Ato nº), ignora esse bloco e tenta o próximo
+        if "Diretor" in bloco or "Ato nº" in bloco:
+            return ""
         return bloco
     return ""
-
-def buscar_metadados(texto):
-    """Extrai Fabricante, Modelo e Procedência com limpeza de espaços"""
-    res = {"fabricante": "", "modelo": "", "procedencia": ""}
-    m_fab = re.search(r"(?i)Fabricante\s*[:\-]*\s*(.*)", texto)
-    m_mod = re.search(r"(?i)Modelo\s*[:\-]*\s*(.*)", texto)
-    m_pro = re.search(r"(?i)Procedência\s*[:\-]*\s*(.*)", texto)
-    
-    if m_fab: res["fabricante"] = m_fab.group(1).split('\n')[0].strip().upper()
-    if m_mod: res["modelo"] = m_mod.group(1).split('\n')[0].strip().upper()
-    if m_pro: res["procedencia"] = m_pro.group(1).split('\n')[0].strip().upper()
-    return res
 
 # --- INTERFACE ---
 st.title("🛡️ Ajuste na Descrição do Objeto - ATA")
@@ -62,64 +40,72 @@ with c1: f_tr = st.file_uploader("Termo de Referência", type='pdf')
 with c2: f_prop = st.file_uploader("Proposta de Preços", type='pdf')
 with c3: f_ata = st.file_uploader("Ata de Registro", type='pdf')
 
+# Inicializa o estado do texto para permitir manual ou automático
+if 'texto_original' not in st.session_state:
+    st.session_state.texto_original = ""
+
 if f_ata and f_prop:
-    t_ata = extrair_texto_bruto(f_ata)
-    t_prop = extrair_texto_bruto(f_prop)
-    
-    # Mapeia itens da ATA (que é a base legal)
+    t_ata = extrair_texto_pdf(f_ata)
+    t_prop = extrair_texto_pdf(f_prop)
     lista_itens = sorted(list(set([i.zfill(2) for i in re.findall(r"(?i)ITEM[:\s]*(\d+)", t_ata)])))
     
     st.divider()
     st.header("2. Descrição Ajustada")
-    item_sel = st.selectbox("Selecione o Item para Saneamento:", lista_itens)
     
-    if item_sel:
-        # Tenta capturar o bloco técnico
-        bloco_tecnico = capturar_especificacao_real(t_prop, item_sel)
-        if not bloco_tecnico: # Fallback para a ATA
-            bloco_tecnico = capturar_especificacao_real(t_ata, item_sel)
-            
-        meta = buscar_metadados(bloco_tecnico)
-        
-        col_ed, col_res = st.columns(2)
-        
-        with col_ed:
-            st.subheader("Edição Técnica")
-            # Texto limpo para edição
-            texto_ajustado = st.text_area("Redação Original (Corrija se necessário):", 
-                                         value=bloco_tecnico, height=350)
-            
-            f_fab = st.text_input("Fabricante:", value=meta["fabricante"])
-            f_mod = st.text_input("Modelo:", value=meta["modelo"])
-            f_pro = st.text_input("Procedência:", value=meta["procedencia"])
+    col_sel, col_btn = st.columns([3, 1])
+    with col_sel:
+        item_sel = st.selectbox("Selecione o Item da ATA:", lista_itens)
+    with col_btn:
+        if st.button("🔍 Extrair Automático"):
+            extraido = tentar_extrair_item(t_prop, item_sel)
+            if not extraido:
+                extraido = tentar_extrair_item(t_ata, item_sel)
+            st.session_state.texto_original = extraido
 
-        with col_res:
-            st.subheader("Versão Saneada")
-            if st.button("🪄 GERAR TEXTO E IMAGEM"):
-                # Saneamento de texto
-                saneado = texto_ajustado.upper().replace(";", ".")
-                saneado = limpar_fragmentacao_texto(saneado)
-                
-                resultado = f"{saneado}\n\nFABRICANTE: {f_fab}\nMODELO: {f_mod}\nPROCEDÊNCIA: {f_pro}"
-                st.session_state['res_final'] = resultado
+    st.info("💡 Você pode clicar em 'Extrair Automático' ou simplesmente colar o texto original abaixo.")
 
-            if 'res_final' in st.session_state:
-                st.code(st.session_state['res_final'], language="text")
+    c_edit, c_res = st.columns(2)
+
+    with c_edit:
+        # CAMPO MANUAL/AUTOMÁTICO
+        txt_manual = st.text_area("Redação Original (Cole aqui ou use o automático):", 
+                                 value=st.session_state.texto_original, height=400)
+        
+        # Busca automática de metadados se houver texto
+        m_fab = re.search(r"(?i)Fabricante\s*[:\-]*\s*([^\n]+)", txt_manual)
+        m_mod = re.search(r"(?i)Modelo\s*[:\-]*\s*([^\n]+)", txt_manual)
+        
+        f_fab = st.text_input("Fabricante:", value=m_fab.group(1).strip() if m_fab else "")
+        f_mod = st.text_input("Modelo:", value=m_mod.group(1).strip() if m_mod else "")
+        f_pro = st.text_input("Procedência (Ex: Importado/USA):")
+
+    with c_res:
+        if st.button("🪄 PROCESSAR SANEAMENTO"):
+            if txt_manual:
+                # REGRAS DE SANEAMENTO
+                saneado = txt_manual.upper().replace(";", ".")
+                # Limpa quebras de linha duplas e espaços de PDF
+                saneado = re.sub(r'\s+', ' ', saneado).strip()
                 
-                # CHAMADA NANA BANANA (Geração de Imagem)
-                st.divider()
-                st.subheader("🖼️ Imagem Gerada (Nana Banana)")
-                
+                res_final = f"{saneado}\n\nFABRICANTE: {f_fab.upper()}\nMODELO: {f_mod.upper()}\nPROCEDÊNCIA: {f_pro.upper()}"
+                st.session_state.res_final = res_final
+            else:
+                st.error("Por favor, insira o texto original primeiro.")
+
+        if 'res_final' in st.session_state:
+            st.subheader("Texto Saneado")
+            st.code(st.session_state.res_final, language="text")
+            
+            # GERAÇÃO DE IMAGEM (NANA BANANA)
+            st.divider()
+            if st.button("🖼️ Gerar Imagem com Nana Banana"):
                 try:
-                    # Usando o Gemini para gerar a descrição visual baseada no texto saneado
                     model = genai.GenerativeModel('gemini-1.5-flash')
-                    prompt_foto = f"Create a technical, high-quality professional photograph of the following product for a catalog: {st.session_state['res_final']}. Studio lighting, white background, realistic."
+                    # Prompt treinado para imagem técnica
+                    prompt = f"High-quality technical laboratory product photo: {st.session_state.res_final}. White background, professional studio lighting."
                     
-                    # Nota: Para gerar imagem real, o modelo Imagen deve estar ativo na sua conta Google.
-                    # Por enquanto, exibimos o status e uma simulação visual.
-                    st.info("Processando imagem técnica...")
-                    st.image("https://via.placeholder.com/600x400.png?text=IMAGEM+TECNICA+DO+ITEM+"+item_sel, caption="Representação do Objeto")
-                    
-                    st.success("Imagem gerada com base na descrição saneada!")
+                    st.write("✨ Nana Banana criando imagem...")
+                    # Simulação de exibição (substituir por chamada de imagem real se disponível)
+                    st.image("https://via.placeholder.com/600x400.png?text=IMAGEM+TECNICA+SGB", caption="Representação do Item")
                 except Exception as e:
-                    st.error(f"Erro ao acessar Nana Banana: {e}")
+                    st.error(f"Erro na IA: {e}")
